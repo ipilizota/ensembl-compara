@@ -15,31 +15,66 @@
 # limitations under the License.
 
 
-#This script can be used to extract information from the Gene Order Conservation score (GOC)
-#It only generates the inputs to be plotted separately.
-#It does not use the API.
+# This script can be used to extract information from the Gene Order Conservation score (GOC)
+# It only generates the inputs to be plotted separately.
 
-#cmd line example:
-#perl generateGocBreakout.pl -outdir /homes/mateus/goc -user ensro -database mateus_tuatara_86 -hostname mysql-treefam-prod:4401
+# cmd line example:
+# perl generateGocBreakout.pl -outdir /homes/mateus/goc -user ensro -database mateus_tuatara_86 -hostname mysql-treefam-prod:4401
 
-#SELECT node_name, nb_genes, nb_long_genes, nb_short_genes, nb_orphan_genes, nb_genes_in_tree, nb_genes_in_tree_single_species, nb_orphan_genes, nb_dup_nodes, nb_gene_splits, (nb_genes-nb_genes_in_tree) as nb_missing_genes FROM species_tree_node_attr JOIN species_tree_node USING (node_id) WHERE node_id IN (SELECT node_id FROM species_tree_node where genome_db_id IS NOT NULL AND root_id = 40001000 group by genome_db_id);
+# SELECT node_name, nb_genes, nb_long_genes, nb_short_genes, nb_orphan_genes, nb_genes_in_tree, nb_genes_in_tree_single_species, nb_orphan_genes, nb_dup_nodes, nb_gene_splits, (nb_genes-nb_genes_in_tree) AS nb_missing_genes
+# FROM species_tree_node_attr
+# JOIN species_tree_node USING (node_id)
+# WHERE node_id IN (
+#     SELECT node_id
+#     FROM species_tree_node
+#     WHERE genome_db_id IS NOT NULL AND root_id = 40001000
+#     GROUP BY genome_db_id
+# );
 
 use strict;
 use DBI;
 use Getopt::Long;
+use Bio::EnsEMBL::Compara::DBSQL::DBAdaptor;
+
+=head2 match_species_name_to_taxon list
+    Arg[1]     :  Bio::EnsEMBL::Compara::GenomeDB $genome_db
+    Arg[2]     :  (arrayref) $taxon_list
+    Description:  Match starting from lowest taxonomic rank climbing, returning string variable at first match.
+    Example    :  my $ref_clade = match_species_name_to_taxon_list($genome_db, $taxon_list);
+    Return     :  (string) $taxon_name or undef
+    Exceptions :  Throws if both (or neither) $genome_db and $taxon_list are provided
+=cut
+
+sub match_species_name_to_taxon_list {
+    my ($genome_db, $taxon_list) = (@_);
+
+    throw ("genome_db and taxon_list need to be provided") unless $genome_db && $taxon_list;
+
+    my @taxon_list = @$taxon_list;
+    my $parent     = $genome_db->taxon->parent;
+
+    while ( $parent->name ne "root" ) {
+        if ( grep { $parent->name eq $_ } @taxon_list ) {
+            return $parent->name;
+        } else {
+            $parent = $parent->parent;
+        }
+    }
+    return undef;
+}
 
 # Parameters
 #-----------------------------------------------------------------------------------------------------
-#Directory to print out the results
+# Directory to print out the results
 my $out_dir;
 
-#MySQL user used to query the database
+# MySQL user used to query the database
 my $user;
 
-#Database to use
+# Database to use
 my $database;
 
-#Hostname used in the query
+# Hostname used in the query
 my $hostname;
 
 #-----------------------------------------------------------------------------------------------------
@@ -49,7 +84,7 @@ my $hostname;
 GetOptions( "outdir=s" => \$out_dir, "user=s" => \$user, "database=s" => \$database, "hostname=s" => \$hostname ) or die("Error in command line arguments\n");
 die "Error in command line arguments [outdir = /your/directory/] [user = your_sql_username] [database = your_database] [hostname = your_host:port] " if ( !$out_dir || !$user || !$database || !$hostname );
 
-#DB connection.
+# DB connection
 #-----------------------------------------------------------------------------------------------------
 my $dsn      = "DBI:mysql:database=$database;host=$hostname";
 my $dbh      = DBI->connect( $dsn, $user );
@@ -61,20 +96,34 @@ my @sorted_names;
 my %sorted_scores;
 my %perc_orth_above_goc_thresh;
 
-my $sql1 = "SELECT method_link_species_set_id FROM method_link_species_set_attr where n_goc_null IS NOT NULL";
+my $sql1 = "
+    SELECT method_link_species_set_id
+    FROM method_link_species_set_attr
+    WHERE perc_orth_above_goc_thresh IS NOT NULL AND perc_orth_above_goc_thresh != 0
+";
 my $sth1 = $dbh->prepare($sql1);
 $sth1->execute();
 while ( my @row1 = $sth1->fetchrow_array() ) {
     my $mlss_id = $row1[0];
-    my $sql2 =
-      "SELECT gdb.name FROM method_link_species_set JOIN species_set USING (species_set_id) JOIN genome_db as gdb USING (genome_db_id) where method_link_species_set_id = $mlss_id";
+    my $sql2 = "
+        SELECT gdb.name
+        FROM method_link_species_set
+        JOIN species_set USING (species_set_id)
+        JOIN genome_db AS gdb USING (genome_db_id)
+        WHERE method_link_species_set_id = $mlss_id
+    ";
     my $sth2 = $dbh->prepare($sql2);
     $sth2->execute();
     while ( my @row2 = $sth2->fetchrow_array() ) {
         push( @{ $names{$mlss_id}{'names'} }, $row2[0] );
     }
 
-    my $sql3 = "SELECT goc_score , COUNT(*) FROM homology where method_link_species_set_id = $mlss_id GROUP BY goc_score";
+    my $sql3 = "
+        SELECT goc_score, COUNT(*)
+        FROM homology
+        WHERE method_link_species_set_id = $mlss_id
+        GROUP BY goc_score
+    ";
     my $sth3 = $dbh->prepare($sql3);
     $sth3->execute();
     my $total = 0;
@@ -95,50 +144,38 @@ while ( my @row1 = $sth1->fetchrow_array() ) {
     }
 }
 
+# Define the taxonomic groups
+my $compara_dba = new Bio::EnsEMBL::Compara::DBSQL::DBAdaptor(
+                    -url => 'mysql://' . $user . '@' . $hostname . '/' . $database,
+                    -species => 'Multi');
+
+my @taxon_list = qw( Mammalia Sauropsida Amphibia Actinopterygii Tunicata Hyperotreti Gnathostomata Ecdysozoa Fungi Cyclostomata );
+
 my %taxon;
+foreach my $genome_db (@{$compara_dba->get_GenomeDBAdaptor->fetch_all}){
+    my $species_name = $genome_db->name;
+    $taxon{$species_name} = match_species_name_to_taxon_list( $genome_db, \@taxon_list);
+}
 
-#Manually define the taxonomic groups:
-$taxon{'alligator_mississippiensis'}   = "Crocodylia";
-$taxon{'alligator_sinensis'}           = "Crocodylia";
-$taxon{'anas_platyrhynchos'}           = "Birds";
-$taxon{'anolis_carolinensis'}          = "Squamata";
-$taxon{'chelonia_mydas'}               = "Testudines";
-$taxon{'chrysemys_picta'}              = "Testudines";
-$taxon{'danio_rerio'}                  = "Fish";
-$taxon{'ficedula_albicollis'}          = "Birds";
-$taxon{'gallus_gallus'}                = "Birds";
-$taxon{'gekko_japonicus'}              = "Squamata";
-$taxon{'homo_sapiens'}                 = "Mammals";
-$taxon{'lepisosteus_oculatus'}         = "Fish";
-$taxon{'meleagris_gallopavo'}          = "Birds";
-$taxon{'monodelphis_domestica'}        = "Mammals";
-$taxon{'mus_musculus'}                 = "Mammals";
-$taxon{'ophiophagus_hannah'}           = "Squamata";
-$taxon{'ophisaurus_gracilis'}          = "Squamata";
-$taxon{'ornithorhynchus_anatinus'}     = "Mammals";
-$taxon{'pelodiscus_sinensis'}          = "Testudines";
-$taxon{'pogona_vitticeps'}             = "Squamata";
-$taxon{'protobothrops_mucrosquamatus'} = "Squamata";
-$taxon{'python_molurus_bivittatus'}    = "Squamata";
-$taxon{'taeniopygia_guttata'}          = "Birds";
-$taxon{'thamnophis_sirtalis'}          = "Squamata";
-$taxon{'sphenodon_punctatus'}          = "Squamata";
-$taxon{'xenopus_tropicalis'}           = "Amphibia";
-
-#Define the colours to plot
+# Define the colours to plot
 my %colors;
-$colors{'Crocodylia'} = "chartreuse4";
-$colors{'Birds'}      = "blue";
-#$colors{'Squamata'}   = "darkslateblue";
-#$colors{'Squamata'}   = "wheat4";
-$colors{'Squamata'}   = "darkorange2";
-$colors{'Mammals'}    = "red";
-$colors{'Fish'}       = "darkcyan";
-$colors{'Testudines'} = "black";
-#$colors{'Amphibia'}   = "darkorchid1";
-$colors{'Amphibia'}   = "deeppink";
+$colors{'Mammalia'}       = "chartreuse4";
+$colors{'Sauropsida'}     = "blue";
+$colors{'Amphibia'}       = "darkslateblue";
+$colors{'Actinopterygii'} = "wheat4";
+$colors{'Tunicata'}       = "darkorange2";
+$colors{'Hyperotreti'}    = "red";
+$colors{'Gnathostomata'}  = "darkcyan";
+$colors{'Ecdysozoa'}      = "black";
+$colors{'Fungi'}          = "darkorchid1";
+$colors{'Cyclostomata'}   = "deeppink";
 
-my $sql4 = "select name from genome_db JOIN ncbi_taxa_node USING (taxon_id) ORDER by left_index;";
+my $sql4 = "
+    SELECT name
+    FROM genome_db
+    JOIN ncbi_taxa_node USING (taxon_id)
+    ORDER BY left_index
+";
 my $sth4 = $dbh->prepare($sql4);
 $sth4->execute();
 while ( my @row = $sth4->fetchrow_array() ) {
@@ -146,17 +183,17 @@ while ( my @row = $sth4->fetchrow_array() ) {
     push( @sorted_names, $name );
 }
 
-#Define which species to use as references:
+# Define which species to use as references
 my @references = ( "homo_sapiens", "sphenodon_punctatus" );
 
 foreach my $reference (@references) {
-    #File with breakout of the different GOC levels
+    # File with breakout of the different GOC levels
     open( my $fh_out, '>', "$out_dir/$reference\_ref.dat" ) || die "Could not open output file at $out_dir";
 
-    #File with the above and bollow 0.5 GOC threasholds
+    # File with the above and bollow 0.5 GOC threasholds
     open( my $fh_out_above_with, '>', "$out_dir/$reference\_above_with_splits.dat" ) || die "Could not open output file at $out_dir";
 
-    #File with the  percentage of scores above 0.5
+    # File with the percentage of scores above 0.5
     open( my $fh_out_above, '>', "$out_dir/$reference\_ref_above_threshold.dat" ) || die "Could not open output file at $out_dir";
 
     print $fh_out "species;goc;threshold;taxon\n";
@@ -169,7 +206,11 @@ foreach my $reference (@references) {
         my $names = join( "", @{ $names{$uniq_mlss_id}{'names'} } );
         if ( $names =~ /$reference/ ) {
             $names =~ s/$reference//;
-            my $sql5 = "select perc_orth_above_goc_thresh from method_link_species_set_attr where method_link_species_set_id = $uniq_mlss_id";
+            my $sql5 = "
+                SELECT perc_orth_above_goc_thresh
+                FROM method_link_species_set_attr
+                WHERE method_link_species_set_id = $uniq_mlss_id
+            ";
             my $sth5 = $dbh->prepare($sql5);
             $sth5->execute();
             while ( my @row5 = $sth5->fetchrow_array() ) {
@@ -182,7 +223,7 @@ foreach my $reference (@references) {
     foreach my $mlss_id ( keys %mlss_ids ) {
         my $names = join( "", @{ $names{$mlss_id}{'names'} } );
 
-        #forcing all scores to be declared:
+        # Forcing all scores to be declared
         my @scores = ( "0", "25", "50", "75", "100" );
         foreach my $score (@scores) {
             if ( !$mlss_ids{$mlss_id}{$score} ) {
@@ -221,8 +262,8 @@ print $fh_heatmap "name1\tname2\tn_goc_0\tn_goc_25\tn_goc_50\tn_goc_75\tn_goc_10
 
 my $sql_heatmap = "
     SELECT
-        replace(ntn1.name, ' ', '_') AS name1,
-        replace(ntn2.name, ' ', '_') AS name2,
+        gdb1.name AS name1,
+        gdb2.name AS name2,
         IFNULL(n_goc_0,0),
         IFNULL(n_goc_25,0),
         IFNULL(n_goc_50,0),
@@ -233,17 +274,17 @@ my $sql_heatmap = "
         (IFNULL(n_goc_50,0) + IFNULL(n_goc_75,0) + IFNULL(n_goc_100,0)) / (IFNULL(n_goc_0,0) + IFNULL(n_goc_25,0) + IFNULL(n_goc_50,0) + IFNULL(n_goc_75,0) + IFNULL(n_goc_100,0)) AS goc_gte_50,
         (IFNULL(n_goc_75,0) + IFNULL(n_goc_100,0)) / (IFNULL(n_goc_0,0) + IFNULL(n_goc_25,0) + IFNULL(n_goc_50,0) + IFNULL(n_goc_75,0) + IFNULL(n_goc_100,0)) AS goc_gte_75,
         IFNULL(n_goc_100,0) / (IFNULL(n_goc_0,0) + IFNULL(n_goc_25,0) + IFNULL(n_goc_50,0) + IFNULL(n_goc_75,0) + IFNULL(n_goc_100,0)) AS goc_eq_100
-    FROM
-        method_link_species_set_attr mlssa inner JOIN   method_link_species_set
-        mlss using (method_link_species_set_id) inner JOIN   species_set ss1 on
-        mlss.species_set_id = ss1.species_set_id inner JOIN   species_set ss2 on
-        mlss.species_set_id = ss2.species_set_id inner JOIN   genome_db gdb1 on
-        ss1.genome_db_id = gdb1.genome_db_id inner JOIN   genome_db gdb2 on
-        ss2.genome_db_id = gdb2.genome_db_id inner JOIN   ncbi_taxa_name ntn1 on
-        gdb1.taxon_id = ntn1.taxon_id inner JOIN   ncbi_taxa_name ntn2 on
-        gdb2.taxon_id = ntn2.taxon_id where   mlss.method_link_id = 201 AND
-        ntn1.name <> ntn2.name AND   ntn1.name_class = 'scientific name' AND
-        ntn2.name_class = 'scientific name' AND gdb1.name NOT LIKE 'mus_musculus_%' AND gdb2.name NOT LIKE 'mus_musculus_%' ORDER by ntn1.name, ntn2.name;
+    FROM method_link_species_set_attr mlssa
+    INNER JOIN method_link_species_set mlss USING (method_link_species_set_id)
+    INNER JOIN species_set ss1 ON mlss.species_set_id = ss1.species_set_id
+    INNER JOIN species_set ss2 ON mlss.species_set_id = ss2.species_set_id
+    INNER JOIN genome_db gdb1 ON ss1.genome_db_id = gdb1.genome_db_id
+    INNER JOIN genome_db gdb2 ON ss2.genome_db_id = gdb2.genome_db_id
+    WHERE mlss.method_link_id = 201
+        AND gdb1.name <> gdb2.name
+        AND gdb1.name NOT LIKE ('mus_musculus_%' OR 'sus_scrofa_%')
+        AND gdb2.name NOT LIKE ('mus_musculus_%' OR 'sus_scrofa_%')
+    ORDER BY gdb1.name, gdb2.name
 ";
 
 my $sth_heatmap = $dbh->prepare($sql_heatmap);
@@ -254,6 +295,119 @@ while ( my @row = $sth_heatmap->fetchrow_array() ) {
 
 close($fh_heatmap);
 
+# File with average and median GOC score for each pair of genomes
+open( my $fh_heatmap_stats, '>', "$out_dir/heatmap_avg_median.data" ) || die "Could not open output file at $out_dir";
+
+print $fh_heatmap_stats "name1\tname2\tgoc_avg\tgoc_median\n";
+
+my $sql_pairwise_stats = "
+    SELECT
+        gdb1.name AS name1,
+        gdb2.name AS name2,
+        ( IFNULL(n_goc_25,0) * 25 + IFNULL(n_goc_50,0) * 50 + IFNULL(n_goc_75,0) * 75 + IFNULL(n_goc_100,0) * 100 ) / ( IFNULL(n_goc_0,0) + IFNULL(n_goc_25,0) + IFNULL(n_goc_50,0) + IFNULL(n_goc_75,0) + IFNULL(n_goc_100,0) ) AS goc_avg,
+        IFNULL(n_goc_0,0) / ( IFNULL(n_goc_0,0) + IFNULL(n_goc_25,0) + IFNULL(n_goc_50,0) + IFNULL(n_goc_75,0) + IFNULL(n_goc_100,0) ) AS goc_eq_0,
+        ( IFNULL(n_goc_0,0) + IFNULL(n_goc_25,0) ) / ( IFNULL(n_goc_0,0) + IFNULL(n_goc_25,0) + IFNULL(n_goc_50,0) + IFNULL(n_goc_75,0) + IFNULL(n_goc_100,0) ) AS goc_lte_25,
+        ( IFNULL(n_goc_0,0) + IFNULL(n_goc_25,0) + IFNULL(n_goc_50,0) ) / ( IFNULL(n_goc_0,0) + IFNULL(n_goc_25,0) + IFNULL(n_goc_50,0) + IFNULL(n_goc_75,0) + IFNULL(n_goc_100,0) ) AS goc_lte_50,
+        ( IFNULL(n_goc_0,0) + IFNULL(n_goc_25,0) + IFNULL(n_goc_50,0) + IFNULL(n_goc_75,0) ) / ( IFNULL(n_goc_0,0) + IFNULL(n_goc_25,0) + IFNULL(n_goc_50,0) + IFNULL(n_goc_75,0) + IFNULL(n_goc_100,0) ) AS goc_lte_75
+    FROM method_link_species_set_attr mlssa
+    INNER JOIN method_link_species_set mlss USING (method_link_species_set_id)
+    INNER JOIN species_set ss1 ON mlss.species_set_id = ss1.species_set_id
+    INNER JOIN species_set ss2 ON mlss.species_set_id = ss2.species_set_id
+    INNER JOIN genome_db gdb1 ON ss1.genome_db_id = gdb1.genome_db_id
+    INNER JOIN genome_db gdb2 ON ss2.genome_db_id = gdb2.genome_db_id
+    WHERE mlss.method_link_id = 201
+        AND gdb1.name <> gdb2.name
+        AND gdb1.name NOT LIKE ('mus_musculus_%' OR 'sus_scrofa_%')
+        AND gdb2.name NOT LIKE ('mus_musculus_%' OR 'sus_scrofa_%')
+    ORDER BY gdb1.name, gdb2.name
+";
+
+my $sth_pairwise_stats = $dbh->prepare($sql_pairwise_stats);
+$sth_pairwise_stats->execute();
+
+while ( my @row = $sth_pairwise_stats->fetchrow_array() ) {
+    if ( $row[3] >= 0.5 ) {
+        print $fh_heatmap_stats "$row[0]\t$row[1]\t$row[2]\t0\n";
+    } elsif ( $row[4] >= 0.5 ) {
+        print $fh_heatmap_stats "$row[0]\t$row[1]\t$row[2]\t25\n";
+    } elsif ( $row[5] >= 0.5 ) {
+        print $fh_heatmap_stats "$row[0]\t$row[1]\t$row[2]\t50\n";
+    } elsif ( $row[6] >= 0.5 ) {
+        print $fh_heatmap_stats "$row[0]\t$row[1]\t$row[2]\t75\n";
+    } else {
+        print $fh_heatmap_stats "$row[0]\t$row[1]\t$row[2]\t100\n";
+    }
+}
+
+close($fh_heatmap_stats);
+
+#---------------------------------------------------------------------------------------------------
+#           Stats for the whole dataset
+#---------------------------------------------------------------------------------------------------
+
+# File with average and median GOC score
+open( my $fh_dataset_stats, '>', "$out_dir/dataset_stats.txt" ) || die "Could not open output file at $out_dir";
+
+print $fh_dataset_stats "Average GOC score: ";
+
+my $sql_goc_avg = "
+    SELECT
+        ( SUM(IFNULL(n_goc_25,0)) * 25 + SUM(IFNULL(n_goc_50,0)) * 50 + SUM(IFNULL(n_goc_75,0)) * 75 + SUM(IFNULL(n_goc_100,0)) * 100 ) /
+	    ( SUM(IFNULL(n_goc_0,0)) + SUM(IFNULL(n_goc_25,0)) + SUM(IFNULL(n_goc_50,0)) + SUM(IFNULL(n_goc_75,0)) + SUM(IFNULL(n_goc_100,0)) ) as goc_avg
+    FROM method_link_species_set_attr mlssa
+    INNER JOIN method_link_species_set mlss USING (method_link_species_set_id)
+    INNER JOIN species_set ss1 ON mlss.species_set_id = ss1.species_set_id
+    INNER JOIN species_set ss2 ON mlss.species_set_id = ss2.species_set_id
+    INNER JOIN genome_db gdb1 ON ss1.genome_db_id = gdb1.genome_db_id
+    INNER JOIN genome_db gdb2 ON ss2.genome_db_id = gdb2.genome_db_id
+    WHERE mlss.method_link_id = 201
+        AND gdb1.name <> gdb2.name
+        AND gdb1.name NOT LIKE ('mus_musculus_%' OR 'sus_scrofa_%')
+        AND gdb2.name NOT LIKE ('mus_musculus_%' OR 'sus_scrofa_%')
+    ORDER BY gdb1.name, gdb2.name;
+";
+
+my $sth_goc_avg = $dbh->prepare($sql_goc_avg);
+$sth_goc_avg->execute();
+my @row = $sth_goc_avg->fetchrow_array();
+print $fh_dataset_stats join("\t", @row) . "\n";
+
+print $fh_dataset_stats "Median GOC score: ";
+
+my $sql_goc_median = "
+    SELECT
+        SUM(IFNULL(n_goc_0,0)) / ( SUM(IFNULL(n_goc_0,0)) + SUM(IFNULL(n_goc_25,0)) + SUM(IFNULL(n_goc_50,0)) + SUM(IFNULL(n_goc_75,0)) + SUM(IFNULL(n_goc_100,0)) ) AS goc_eq_0,
+        ( SUM(IFNULL(n_goc_0,0)) + SUM(IFNULL(n_goc_25,0)) ) / ( SUM(IFNULL(n_goc_0,0)) + SUM(IFNULL(n_goc_25,0)) + SUM(IFNULL(n_goc_50,0)) + SUM(IFNULL(n_goc_75,0)) + SUM(IFNULL(n_goc_100,0)) ) AS goc_lte_25,
+        ( SUM(IFNULL(n_goc_0,0)) + SUM(IFNULL(n_goc_25,0)) + SUM(IFNULL(n_goc_50,0)) ) / ( SUM(IFNULL(n_goc_0,0)) + SUM(IFNULL(n_goc_25,0)) + SUM(IFNULL(n_goc_50,0)) + SUM(IFNULL(n_goc_75,0)) + SUM(IFNULL(n_goc_100,0)) ) AS goc_lte_50,
+        ( SUM(IFNULL(n_goc_0,0)) + SUM(IFNULL(n_goc_25,0)) + SUM(IFNULL(n_goc_50,0)) + SUM(IFNULL(n_goc_75,0)) ) / ( SUM(IFNULL(n_goc_0,0)) + SUM(IFNULL(n_goc_25,0)) + SUM(IFNULL(n_goc_50,0)) + SUM(IFNULL(n_goc_75,0)) + SUM(IFNULL(n_goc_100,0)) ) AS goc_lte_75
+    FROM method_link_species_set_attr mlssa
+    INNER JOIN method_link_species_set mlss USING (method_link_species_set_id)
+    INNER JOIN species_set ss1 ON mlss.species_set_id = ss1.species_set_id
+    INNER JOIN species_set ss2 ON mlss.species_set_id = ss2.species_set_id
+    INNER JOIN genome_db gdb1 ON ss1.genome_db_id = gdb1.genome_db_id
+    INNER JOIN genome_db gdb2 ON ss2.genome_db_id = gdb2.genome_db_id
+    WHERE mlss.method_link_id = 201
+        AND gdb1.name <> gdb2.name
+        AND gdb1.name NOT LIKE ('mus_musculus_%' OR 'sus_scrofa_%')
+        AND gdb2.name NOT LIKE ('mus_musculus_%' OR 'sus_scrofa_%')
+    ORDER BY gdb1.name, gdb2.name
+";
+
+my $sth_goc_median = $dbh->prepare($sql_goc_median);
+$sth_goc_median->execute();
+my @row = $sth_goc_median->fetchrow_array();
+if ( $row[0] >= 0.5 ) {
+    print $fh_dataset_stats "0\n";
+} elsif ( $row[1] >= 0.5 ) {
+    print $fh_dataset_stats "25\n";
+} elsif ( $row[2] >= 0.5 ) {
+    print $fh_dataset_stats "50\n";
+} elsif ( $row[3] >= 0.5 ) {
+    print $fh_dataset_stats "75\n";
+} else {
+    print $fh_dataset_stats "100\n";
+}
+
 #---------------------------------------------------------------------------------------------------
 # Additional plots
 #---------------------------------------------------------------------------------------------------
@@ -261,7 +415,14 @@ close($fh_heatmap);
 # Homology count
 #---------------------------------------------------------------------------------------------------
 my %homology;
-my $sql_homology = "SELECT genome_db.name, description, COUNT(*) FROM homology JOIN method_link_species_set USING (method_link_species_set_id) JOIN species_set USING (species_set_id) JOIN genome_db USING (genome_db_id) GROUP BY genome_db_id, description";
+my $sql_homology = "
+    SELECT genome_db.name, description, COUNT(*)
+    FROM homology
+    JOIN method_link_species_set USING (method_link_species_set_id)
+    JOIN species_set USING (species_set_id)
+    JOIN genome_db USING (genome_db_id)
+    GROUP BY genome_db_id, description
+";
 
 my $sth_homology = $dbh->prepare($sql_homology);
 $sth_homology->execute();
@@ -289,7 +450,18 @@ close($fh_homology);
 # Gene count
 #---------------------------------------------------------------------------------------------------
 my %gene_count;
-my $sql_gene_count = "SELECT node_name, nb_genes, nb_long_genes, nb_short_genes, nb_orphan_genes, nb_genes_in_tree, nb_genes_in_tree_single_species, nb_dup_nodes, nb_gene_splits FROM species_tree_node_attr JOIN species_tree_node USING (node_id) WHERE node_id IN (SELECT node_id FROM species_tree_node where genome_db_id IS NOT NULL GROUP BY genome_db_id) ORDER BY node_name";
+my $sql_gene_count = "
+    SELECT node_name, nb_genes, nb_long_genes, nb_short_genes, nb_orphan_genes, nb_genes_in_tree, nb_genes_in_tree_single_species, nb_dup_nodes, nb_gene_splits
+    FROM species_tree_node_attr
+    JOIN species_tree_node USING (node_id)
+    WHERE node_id IN (
+        SELECT node_id
+        FROM species_tree_node
+        WHERE genome_db_id IS NOT NULL
+        GROUP BY genome_db_id
+    )
+    ORDER BY node_name
+";
 
 open( my $fh_gene_count, '>', "$out_dir/gene_count.data" ) || die "Could not open output file at $out_dir";
 print $fh_gene_count "species\tnb_genes\tnb_long_genes\tnb_short_genes\tnb_orphan_genes\tnb_genes_in_tree\tnb_genes_in_tree_single_species\tnb_dup_nodes\tnb_gene_splits\n";
@@ -303,4 +475,3 @@ close($fh_gene_count);
 
 
 sub num { $a <=> $b }
-

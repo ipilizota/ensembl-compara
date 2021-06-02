@@ -16,15 +16,15 @@
 # limitations under the License.
 
 
-#Data can be exctracted from the database by running the generateGocBreakout.pl script:
-#   perl generateGocBreakout.pl -outdir /homes/mateus/goc -user ensro -database mateus_tuatara_86 -hostname mysql-treefam-prod:4401
+# Data can be exctracted from the database by running the generateGocBreakout.pl script:
+#    perl generateGocBreakout.pl -outdir /homes/mateus/goc -user ensro -database mateus_tuatara_86 -hostname mysql-treefam-prod:4401
 
-#How to plot the data:
-#   Rscript plotGocData.r your_tree.newick /your/output_directory/ your_reference_species_file
+# How to plot the data:
+#    Rscript plotGocData.r your_tree.newick /your/output_directory/ your_reference_species_file
 
 args = commandArgs(trailingOnly = TRUE)
 if (length(args) != 3) {
-  stop('Four arguments are required: tree_file out_dir reference_species_file')
+  stop('Three arguments are required: tree_file out_dir reference_species_file')
 }
 
 tree_file               = args[1]
@@ -35,15 +35,16 @@ library(ape)
 library(reshape2)
 library(ggplot2)
 
-heatmap.phylo = function(x_mat, tree_row, tree_col, filename, maintitle, ...) {
-  # x_mat:     numeric matrix, with rows and columns labelled with species names
-  # tree_row:  phylogenetic tree (class phylo) to be used in rows
-  # tree_col:  phylogenetic tree (class phylo) to be used in columns
-  # filename:  path to SVG for saving plot
-  # maintitle: title for plot
+heatmap.phylo = function(x_mat, tree_row, tree_col, filename, maintitle, legend_text, ...) {
+  # x_mat:        numeric matrix, with rows and columns labelled with species names
+  # tree_row:     phylogenetic tree (class phylo) to be used in rows
+  # tree_col:     phylogenetic tree (class phylo) to be used in columns
+  # filename:     path to SVG for saving plot
+  # maintitle:    title for plot
+  # legend_text:  legend for plot
   # ... additional arguments to be passed to image function
   
-  pdf(filename, width=10, height=10)
+  pdf(filename, width=20, height=20, pointsize=0.03)
   
   # The matrix needs to be re-ordered, to match the order of the tree tips.
   tree_row_is_tip    = tree_row$edge[,2] <= length(tree_row$tip)
@@ -63,11 +64,11 @@ heatmap.phylo = function(x_mat, tree_row, tree_col, filename, maintitle, ...) {
   
   # Plot tree downwards, at top of plot
   par(mar=c(0,0,2,0))
-  plot(tree_col, direction='downwards', show.tip.label=FALSE, xaxs='i', x.lim=x_lim, main=maintitle)
+  plot(tree_col, direction='downwards', show.tip.label=FALSE, xaxs='i', x.lim=x_lim, main=maintitle, cex.main=3)
   
   # Add legend
   plot(NA, axes=FALSE, ylab='', xlab='', ylim=c(0,1), xlim=c(0,1))
-  legend('center', c('10%', '20%', '30%', '40%', '50%', '60%', '70%', '80%', '90%', '100%'), ncol=2, ...)
+  legend('center', legend_text, ncol=2, cex=4, ...)
   
   # Plot tree on left side of plot
   par(mar=rep(0,4))
@@ -75,7 +76,7 @@ heatmap.phylo = function(x_mat, tree_row, tree_col, filename, maintitle, ...) {
   
   # Plot heatmap
   par(mar=rep(0,4), xpd=TRUE)
-  image((1:nrow(x_mat))-0.5, (1:ncol(x_mat))-0.5, x_mat, xaxs='i', yaxs='i', axes=FALSE, xlab='',ylab='', ...)
+  image((1:nrow(x_mat))-0.5, (1:ncol(x_mat))-0.5, x_mat, xaxs='i', yaxs='i', axes=FALSE, xlab='', ylab='', ...)
   
   # Plot names on right side of plot
   par(mar=rep(0,4))
@@ -154,19 +155,36 @@ goc_100_matrix = as.matrix(acast(goc_summary, name1~name2, value.var='goc_eq_100
 n_goc_cols     = c('n_goc_0', 'n_goc_25', 'n_goc_50', 'n_goc_75', 'n_goc_100')
 n_goc_labels   = c('GOC score = 0', 'GOC score = 25', 'GOC score = 50', 'GOC score = 75', 'GOC score = 100')
 
+goc_stats         = read.delim(paste(out_dir, "heatmap_avg_median.data", sep='/'), sep="\t", header=TRUE, na.strings=c('NULL'))
+goc_avg_matrix    = as.matrix(acast(goc_stats, name1~name2, value.var='goc_avg'))
+goc_median_matrix = as.matrix(acast(goc_stats, name1~name2, value.var='goc_median'))
 
-heatmap_col    = rev(heat.colors(10))
+species_names = unique(goc_summary$name1)
+remove_tips   = setdiff(phylo_tree$tip.label, species_names)
+phylo_tree    = drop.tip(phylo_tree, remove_tips, trim.internal = TRUE, subtree = FALSE,
+                         root.edge = 0, rooted = is.rooted(phylo_tree), collapse.singles = TRUE,
+                         interactive = FALSE)
+
+heatmap_col           = rev(heat.colors(10))
+heatmap_legend        = c('10%', '20%', '30%', '40%', '50%', '60%', '70%', '80%', '90%', '100%')
+heatmap_legend_avg    = c('min', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', 'max')
+heatmap_col_median    = rev(heat.colors(5))
+heatmap_legend_median = c('0', '25', '50', '75', '100')
+
 barplot_col    = rainbow(length(n_goc_cols))
 
 
 #-------------------------------------------------------------------------
 #                               Heatmaps
 #-------------------------------------------------------------------------
-heatmap.phylo(goc_0_matrix,   phylo_tree, phylo_tree, paste(out_dir, 'goc_0.pdf', sep='/'),   'Percentage of orthologs with GOC score = 0',   col=heatmap_col, fill=heatmap_col, border=heatmap_col)
-heatmap.phylo(goc_25_matrix,  phylo_tree, phylo_tree, paste(out_dir, 'goc_25.pdf', sep='/'),  'Percentage of orthologs with GOC score >= 25', col=heatmap_col, fill=heatmap_col, border=heatmap_col)
-heatmap.phylo(goc_50_matrix,  phylo_tree, phylo_tree, paste(out_dir, 'goc_50.pdf', sep='/'),  'Percentage of orthologs with GOC score >= 50', col=heatmap_col, fill=heatmap_col, border=heatmap_col)
-heatmap.phylo(goc_75_matrix,  phylo_tree, phylo_tree, paste(out_dir, 'goc_75.pdf', sep='/'),  'Percentage of orthologs with GOC score >= 75', col=heatmap_col, fill=heatmap_col, border=heatmap_col)
-heatmap.phylo(goc_100_matrix, phylo_tree, phylo_tree, paste(out_dir, 'goc_100.pdf', sep='/'), 'Percentage of orthologs with GOC score = 100', col=heatmap_col, fill=heatmap_col, border=heatmap_col)
+heatmap.phylo(goc_0_matrix,   phylo_tree, phylo_tree, paste(out_dir, 'goc_0.pdf', sep='/'),   'Percentage of orthologs with GOC score = 0', heatmap_legend, col=heatmap_col, fill=heatmap_col, border=heatmap_col)
+heatmap.phylo(goc_25_matrix,  phylo_tree, phylo_tree, paste(out_dir, 'goc_25.pdf', sep='/'),  'Percentage of orthologs with GOC score >= 25', heatmap_legend, col=heatmap_col, fill=heatmap_col, border=heatmap_col)
+heatmap.phylo(goc_50_matrix,  phylo_tree, phylo_tree, paste(out_dir, 'goc_50.pdf', sep='/'),  'Percentage of orthologs with GOC score >= 50', heatmap_legend, col=heatmap_col, fill=heatmap_col, border=heatmap_col)
+heatmap.phylo(goc_75_matrix,  phylo_tree, phylo_tree, paste(out_dir, 'goc_75.pdf', sep='/'),  'Percentage of orthologs with GOC score >= 75', heatmap_legend, col=heatmap_col, fill=heatmap_col, border=heatmap_col)
+heatmap.phylo(goc_100_matrix, phylo_tree, phylo_tree, paste(out_dir, 'goc_100.pdf', sep='/'), 'Percentage of orthologs with GOC score = 100', heatmap_legend, col=heatmap_col, fill=heatmap_col, border=heatmap_col)
+
+heatmap.phylo(goc_avg_matrix,    phylo_tree, phylo_tree, paste(out_dir, 'goc_avg.pdf', sep='/'),    'Average GOC score', heatmap_legend_avg, col=heatmap_col, fill=heatmap_col, border=heatmap_col)
+heatmap.phylo(goc_median_matrix, phylo_tree, phylo_tree, paste(out_dir, 'goc_median.pdf', sep='/'), 'Median GOC score',  heatmap_legend_median, col=heatmap_col_median, fill=heatmap_col_median, border=heatmap_col_median)
 
 
 for (species in levels(goc_summary$name1)) {
@@ -263,13 +281,17 @@ for (ref_species in levels(reference_species$V1)) {
     sorted_species_list <- rev(species_list)
     sorted_taxon_list <- rev(taxon_list)
 
-    list <- c("Crocodylia" = "chartreuse4"
-              , "Aves" = "blue"
-              , "Squamata" = "darkorange2"
-              , "Mammalia" = "red"
-              , "Neopterygii" = "darkcyan"
-              , "Testudines" = "black"
-              , "Amphibia" = "deeppink")
+    list <- c("Mammalia" = "chartreuse4"
+              , "Sauropsida" = "blue"
+              , "Amphibia" = "darkslateblue"
+              , "Actinopterygii" = "wheat4"
+              , "Tunicata" = "darkorange2"
+              , "Hyperotreti" = "red"
+              , "Gnathostomata" = "darkcyan"
+              , "Ecdysozoa" = "black"
+              , "Fungi" = "darkorchid1"
+              , "Cyclostomata" = "deeppink"
+              )
 
     raw_data$species <- factor(raw_data$species, levels = sorted_species_list)
     raw_data$taxonomy <- sapply(raw_data$taxon, function(x){attributes(list[list == x])[[1]]})
