@@ -107,7 +107,6 @@ sub write_output {
 
     # iterate over homology input and format it for later mysqlimport
     my $h_count = 0;
-    my $hc_exp_vals;
     my $homology_id_start = $self->param_required('homology_id_start');
     while ( my $line = <$hom_fh> ) {
         my $row = map_row_to_header($line, \@header_cols);
@@ -122,10 +121,7 @@ sub write_output {
         my ( $homology_row, $homology_member_rows ) = $self->split_row_for_homology_tables($row, $this_homology_id);
         print $h_csv $homology_row;
         print $hm_csv $homology_member_rows;
-
-        # gather stats for healthchecks
         $h_count++;
-        $hc_exp_vals = $self->gather_hc_stats($hc_exp_vals, $row);
     }
     close $h_csv;
     close $hm_csv;
@@ -157,15 +153,10 @@ sub write_output {
         my $import_cmd = "mysql --host=$host --port=$port --user=$user --password=$pass --local-infile=1 $dbname -e \"$import_query\" --max_allowed_packet=1024M";
         my $command = $self->run_command($import_cmd);
 
-        # Make sure all the homologies have been copied correctly
-        $hc_exp_vals->{total_rows} = $h_count;
-        my $hc_passed = $self->hc_homology_import($hc_exp_vals);
-        print "HC " . ( $hc_passed ? 'PASSED' : 'FAILED' ) . "\n\n" if $self->debug;
-
         # Check what has happened
-        if ($command->err =~ /Lock wait timeout exceeded/ || !$hc_passed) {
+        if ($command->err =~ /Lock wait timeout exceeded/) {
             # Try importing the data again but in replace mode, just in case some rows were half-copied
-            print ($hc_passed ? "Received 'Lock wait timeout exceeded'." : "The imported data appeared corrupted.") . " Retrying...\n" if $self->debug;
+            print "Received 'Lock wait timeout exceeded'. Retrying...\n" if $self->{debug};
             if (! $replace) {
                 $import_query =~ s/  INTO / REPLACE INTO /g;
                 $replace = 1;
@@ -178,6 +169,13 @@ sub write_output {
         }
     }
     $self->warning("'homology' and 'homology_member' data imported successfully after $num_tries attempts\n");
+
+    # Make sure all the homologies have been copied correctly
+    my $mlss_id = $self->param_required('mlss_id');
+    my $h_rows = $self->compara_dba->dbc->sql_helper->execute_single_result(
+        -SQL => "SELECT COUNT(*) FROM homology WHERE method_link_species_set_id = $mlss_id"
+    );
+    die "The number of lines in the homology flat file ($h_count) doesn't match the number of rows written in the homology table ($h_rows)" if $h_count != $h_rows;
 }
 
 sub split_row_for_homology_tables {
